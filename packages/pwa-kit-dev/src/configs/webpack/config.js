@@ -128,29 +128,35 @@ const getPublicPathEntryPoint = () =>
 
 /**
  * Resolves a dependency to a single on‑disk location so webpack can de‑duplicate
- * references. The lookup strategy tries:
- *   1. <project>/node_modules
- *   2. Node's standard resolution algorithm with `projectDir` and `__dirname` as bases
- *   3. Walking up the directory tree from the current file, checking node_modules each level
+ * references. The lookup strategy tries..,
  */
 const findDepInStack = (pkgName) => {
+    // 1. <project>/node_modules
     const preferred = path.resolve(projectDir, 'node_modules', pkgName)
     if (fse.existsSync(preferred)) return preferred
 
+    // 2. Node's standard resolution algorithm with `projectDir` and `__dirname` as bases
     const tryPaths = [projectDir, __dirname]
     try {
         return path.dirname(require.resolve(pkgName, {paths: tryPaths}))
-    } catch {}
-
-    let cwd = __dirname
-    for (let i = 0; i < 8; i++) {
-        const candidate = path.resolve(cwd, 'node_modules', pkgName)
-        if (fse.existsSync(candidate)) return candidate
-        cwd = path.dirname(cwd)
+    } catch {
+        console.warn(`[WARN] Could not resolve ${pkgName}`)
     }
 
-    console.warn(`[WARN] Could not resolve ${pkgName}`)
-    return undefined
+    // 3. Walk up the directory tree from __dirname, checking node_modules at each level
+    const candidates = [
+        path.resolve(__dirname, '..', 'node_modules', pkgName),
+        path.resolve(__dirname, '..', '..', 'node_modules', pkgName),
+        path.resolve(__dirname, '..', '..', '..', 'node_modules', pkgName),
+        path.resolve(__dirname, '..', '..', '..', '..', 'node_modules', pkgName)
+    ]
+    let candidate
+    for (candidate of candidates) {
+        if (fse.existsSync(candidate)) {
+            return candidate
+        }
+    }
+    return candidate
 }
 
 const baseConfig = (target) => {
