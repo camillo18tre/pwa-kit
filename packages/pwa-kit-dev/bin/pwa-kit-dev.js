@@ -12,7 +12,7 @@ const fse = require('fs-extra')
 const WebSocket = require('ws')
 const program = require('commander')
 const validator = require('validator')
-const {execSync: _execSync} = require('child_process')
+const {execSync: _execSync, spawnSync} = require('child_process')
 const {getConfig} = require('@salesforce/pwa-kit-runtime/utils/ssr-config')
 
 // Scripts in ./bin have never gone through babel, so we
@@ -235,18 +235,15 @@ const main = async () => {
             new program.Option(
                 '--babelArgs <babel-args>',
                 'args to pass through to babel-node'
-            ).default('--extensions ".js,.jsx,.ts,.tsx"')
+            ).default('--extensions .js,.jsx,.ts,.tsx')
         )
         .action(async ({inspect, noHMR, babelArgs}) => {
-            // We use @babel/node instead of node because we want to support ES6 import syntax
-            const babelNode = p.join(
-                require.resolve('webpack'),
-                '..',
-                '..',
-                '..',
-                '.bin',
-                'babel-node'
-            )
+            /**
+             * We use @babel/node instead of raw node to support ESM-style imports.
+             * IMPORTANT: invoke *through* Node for Windows compatibility (shebangs aren't honored on cmd.exe).
+             */
+            const nodeExec = process.execPath
+            const babelNode = require.resolve('@babel/node/bin/babel-node.js')
 
             const entrypoint = await getAppEntrypoint()
             if (!entrypoint) {
@@ -254,12 +251,41 @@ const main = async () => {
                 process.exit(1)
             }
 
-            execSync(`${babelNode} ${inspect ? '--inspect' : ''} ${babelArgs} ${entrypoint}`, {
+            // Commander may give string or array for babelArgs; normalize to array of tokens.
+            const normBabelArgs = Array.isArray(babelArgs)
+                ? babelArgs
+                : typeof babelArgs === 'string' && babelArgs.trim()
+                ? babelArgs.trim().split(/\s+/)
+                : []
+
+            const args = [
+                babelNode,
+                ...(inspect ? ['--inspect'] : []),
+                ...normBabelArgs,
+                entrypoint
+            ]
+
+            if (process.env.DEBUG_PWA_KIT_DEV === 'true') {
+                console.log('[pwa-kit-dev] start spawn:', nodeExec, args.join(' '))
+            }
+
+            const child = spawnSync(nodeExec, args, {
+                stdio: 'inherit',
+                shell: false,
                 env: {
                     ...process.env,
-                    ...(noHMR ? {HMR: 'false'} : {})
+                    NODE_ENV: noHMR ? 'production' : 'development'
                 }
             })
+
+            if (child.error) {
+                error(child.error)
+                process.exit(child.status ?? 1)
+            }
+            if (child.status !== 0) {
+                process.exit(child.status)
+            }
+            return
         })
 
     program
@@ -274,18 +300,33 @@ const main = async () => {
         )
         .description(`build your app for production`)
         .action(async ({buildDirectory}) => {
-            const webpack = p.join(require.resolve('webpack'), '..', '..', '..', '.bin', 'webpack')
+            let webpackBin
+            try {
+                webpackBin = require.resolve('webpack-cli/bin/cli.js')
+            } catch {
+                webpackBin = p.join(require.resolve('webpack'), '..', '..', '..', '.bin', 'webpack')
+            }
+
             const projectWebpack = p.join(process.cwd(), 'webpack.config.js')
             const webpackConf = fse.pathExistsSync(projectWebpack)
                 ? projectWebpack
                 : p.join(__dirname, '..', 'configs', 'webpack', 'config.js')
+
             fse.emptyDirSync(buildDirectory)
-            execSync(`${webpack} --config ${webpackConf}`, {
+
+            const args = [webpackBin, '--config', webpackConf]
+
+            if (process.env.DEBUG_PWA_KIT_DEV === 'true') {
+                console.log('[pwa-kit-dev] build spawn:', process.execPath, args.join(' '))
+            }
+
+            const buildChild = spawnSync(process.execPath, args, {
+                stdio: 'inherit',
+                shell: false,
                 env: {
                     NODE_ENV: 'production',
-                    ...process.env,
-                    // Command option overrides the env var, so we must continue that pattern
-                    PWA_KIT_BUILD_DIR: buildDirectory
+                    PWA_KIT_BUILD_DIR: buildDirectory,
+                    ...process.env
                 }
             })
 
@@ -309,6 +350,15 @@ const main = async () => {
                     '// This file is required by Managed Runtime for historical reasons.\n'
                 )
             }
+
+            if (buildChild.error) {
+                error(buildChild.error)
+                process.exit(buildChild.status ?? 1)
+            }
+            if (buildChild.status !== 0) {
+                process.exit(buildChild.status)
+            }
+            return
         })
 
     managedRuntimeCommand('push')

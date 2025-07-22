@@ -67,18 +67,14 @@ export const EXT_EXTENDABLE = pkg?.ccExtensibility?.extendable
 // due to to how the sdks work and the potential of these npm deps coming
 // from multiple places, we need to force them to one place where they're found
 export const DEPS_TO_DEDUPE = [
-    'babel-runtime',
     '@tanstack/react-query',
     '@loadable/component',
-    '@loadable/server',
     '@loadable/webpack-plugin',
-    'svg-sprite-loader',
     'react',
     'react-router-dom',
     'react-dom',
     'react-helmet',
     'webpack-hot-middleware',
-    'react-intl',
     '@chakra-ui/icons',
     '@chakra-ui/react',
     '@chakra-ui/skip-nav',
@@ -110,12 +106,11 @@ const getBundleAnalyzerPlugin = (name = 'report', pluginOptions) =>
     })
 
 const entryPointExists = (segments) => {
-    for (let ext of ['.js', '.jsx', '.ts', '.tsx']) {
+    for (const ext of ['.js', '.jsx', '.ts', '.tsx']) {
         const primary = resolve(projectDir, ...segments) + ext
         const override = EXT_OVERRIDES_DIR
             ? resolve(projectDir, EXT_OVERRIDES_DIR_NO_SLASH, ...segments) + ext
             : null
-
         if (fse.existsSync(primary) || (override && fse.existsSync(override))) {
             return true
         }
@@ -123,38 +118,39 @@ const entryPointExists = (segments) => {
     return false
 }
 
-const getAppEntryPoint = () => {
-    return resolve('./', EXT_OVERRIDES_DIR_NO_SLASH, 'app', 'main')
-}
+const getAppEntryPoint = () => resolve('./', EXT_OVERRIDES_DIR_NO_SLASH, 'app', 'main')
 
-const getPublicPathEntryPoint = () => {
-    return resolve(
-        projectDir,
-        'node_modules',
-        '@salesforce',
-        'pwa-kit-dev',
-        'ssr',
-        'server',
-        'public-path'
-    )
-}
+// Use require.resolve so that sub‑path exports are respected across all Node versions
+const getPublicPathEntryPoint = () =>
+    require.resolve('@salesforce/pwa-kit-dev/ssr/server/public-path', {
+        paths: [projectDir]
+    })
 
-const findDepInStack = (pkg) => {
-    // Look for the SDK node_modules in two places because in CI,
-    // pwa-kit-dev is published under a 'dist' directory, which
-    // changes this file's location relative to the package root.
-    const candidates = [
-        resolve(projectDir, 'node_modules', pkg),
-        resolve(__dirname, '..', '..', 'node_modules', pkg),
-        resolve(__dirname, '..', '..', '..', 'node_modules', pkg)
-    ]
-    let candidate
-    for (candidate of candidates) {
-        if (fse.existsSync(candidate)) {
-            return candidate
-        }
+/**
+ * Resolves a dependency to a single on‑disk location so webpack can de‑duplicate
+ * references. The lookup strategy tries:
+ *   1. <project>/node_modules
+ *   2. Node's standard resolution algorithm with `projectDir` and `__dirname` as bases
+ *   3. Walking up the directory tree from the current file, checking node_modules each level
+ */
+const findDepInStack = (pkgName) => {
+    const preferred = path.resolve(projectDir, 'node_modules', pkgName)
+    if (fse.existsSync(preferred)) return preferred
+
+    const tryPaths = [projectDir, __dirname]
+    try {
+        return path.dirname(require.resolve(pkgName, {paths: tryPaths}))
+    } catch {}
+
+    let cwd = __dirname
+    for (let i = 0; i < 8; i++) {
+        const candidate = path.resolve(cwd, 'node_modules', pkgName)
+        if (fse.existsSync(candidate)) return candidate
+        cwd = path.dirname(cwd)
     }
-    return candidate
+
+    console.warn(`[WARN] Could not resolve ${pkgName}`)
+    return undefined
 }
 
 const baseConfig = (target) => {
@@ -208,7 +204,7 @@ const baseConfig = (target) => {
                                   new OverridesResolverPlugin({
                                       extends: [EXT_EXTENDS],
                                       overridesDir: EXT_OVERRIDES_DIR,
-                                      projectDir: process.cwd()
+                                      projectDir
                                   })
                               ]
                           }
@@ -264,18 +260,11 @@ const baseConfig = (target) => {
                         ruleForBabelLoader(),
                         target === 'node' && {
                             test: /\.svg$/,
-                            loader: findDepInStack('svg-sprite-loader')
+                            loader: require.resolve('svg-sprite-loader')
                         },
                         target === 'web' && {
                             test: /\.svg$/,
                             loader: findDepInStack('ignore-loader')
-                        },
-                        {
-                            test: /\.html$/,
-                            exclude: /node_modules/,
-                            use: {
-                                loader: findDepInStack('html-loader')
-                            }
                         },
                         {
                             test: /\.js$/,
